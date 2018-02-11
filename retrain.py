@@ -1,4 +1,5 @@
-# Copyright 2015 The TensorFlow Authors. All Rights Reserved.
+# Original Work: Copyright 2015 The TensorFlow Authors. All Rights Reserved.
+# Modifications: Copyright 2018 R. Johnstone
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -73,6 +74,8 @@ import re
 import struct
 import sys
 import tarfile
+import csv
+import collections
 
 import numpy as np
 from six.moves import urllib
@@ -102,7 +105,52 @@ RESIZED_INPUT_TENSOR_NAME = 'ResizeBilinear:0'
 MAX_NUM_IMAGES_PER_CLASS = 2 ** 27 - 1  # ~134M
 
 
-def create_image_lists(image_dir, testing_percentage, validation_percentage):
+def create_category_dir(image_dir, test_dir='', validation_dir=''):
+  """Makes a dictionary for the image directories by category
+
+  Args:
+    image_dir: String path to a folder containing subfolders of images.
+    test_dir: String path to a folder containing subfolders of images to be used
+    for testing.
+    validation_dir: String path to a folder containing subfolders of images to be
+    used for validation.
+
+  Returns:
+    A dictionary; keys: categories (training, testing, validation),
+    values: paths to directories containing the subdirectories which in turn
+    contain the image data.
+  """
+  if test_dir == '':
+    test_dir = image_dir
+  if validation_dir == '':
+    validation_dir = image_dir
+
+  if not gfile.Exists(image_dir):
+    print("Image directory '" + image_dir + "' not found.")
+    return None
+  if not gfile.Exists(test_dir):
+    print("Test directory '" + test_dir + "' not found.")
+    return None
+  if not gfile.Exists(validation_dir):
+    print("Validation directory '" + validation_dir + "' not found.")
+    return None
+
+  return {'training': image_dir, 'testing': test_dir, 'validation': validation_dir}
+
+
+def adjust_category_percentages(category_dir, testing_percentage, validation_percentage):
+  """ Sets testing and validation percentages to zero in the event that these categories
+    have their own directories (the directory then determines whether an image is used
+    for training, testing, or validation)
+  """
+  if category_dir["testing"] != category_dir["training"]:
+    testing_percentage = 0.0
+  if category_dir["validation"] != category_dir["training"]:
+    validation_percentage = 0.0
+  return testing_percentage, validation_percentage
+
+
+def create_image_lists(category_dir, testing_percentage, validation_percentage):
   """Builds a list of training images from the file system.
 
   Analyzes the sub folders in the image directory, splits them into stable
@@ -110,7 +158,8 @@ def create_image_lists(image_dir, testing_percentage, validation_percentage):
   describing the lists of images for each label and their paths.
 
   Args:
-    image_dir: String path to a folder containing subfolders of images.
+    category_dir: Dictionary (by category, training, testing, or validation) of
+    paths to folders containing subfolders of images.
     testing_percentage: Integer percentage of the images to reserve for tests.
     validation_percentage: Integer percentage of images reserved for validation.
 
@@ -118,69 +167,82 @@ def create_image_lists(image_dir, testing_percentage, validation_percentage):
     A dictionary containing an entry for each label subfolder, with images split
     into training, testing, and validation sets within each label.
   """
-  if not gfile.Exists(image_dir):
-    print("Image directory '" + image_dir + "' not found.")
-    return None
-  result = {}
-  sub_dirs = [x[0] for x in gfile.Walk(image_dir)]
-  # The root directory comes first, so skip it.
-  is_root_dir = True
-  for sub_dir in sub_dirs:
-    if is_root_dir:
-      is_root_dir = False
-      continue
-    extensions = ['jpg', 'jpeg', 'JPG', 'JPEG']
-    file_list = []
-    dir_name = os.path.basename(sub_dir)
-    if dir_name == image_dir:
-      continue
-    print("Looking for images in '" + dir_name + "'")
-    for extension in extensions:
-      file_glob = os.path.join(image_dir, dir_name, '*.' + extension)
-      file_list.extend(gfile.Glob(file_glob))
-    if not file_list:
-      print('No files found')
-      continue
-    if len(file_list) < 20:
-      print('WARNING: Folder has less than 20 images, which may cause issues.')
-    elif len(file_list) > MAX_NUM_IMAGES_PER_CLASS:
-      print('WARNING: Folder {} has more than {} images. Some images will '
-            'never be selected.'.format(dir_name, MAX_NUM_IMAGES_PER_CLASS))
-    label_name = re.sub(r'[^a-z0-9]+', ' ', dir_name.lower())
-    training_images = []
-    testing_images = []
-    validation_images = []
-    for file_name in file_list:
-      base_name = os.path.basename(file_name)
-      # We want to ignore anything after '_nohash_' in the file name when
-      # deciding which set to put an image in, the data set creator has a way of
-      # grouping photos that are close variations of each other. For example
-      # this is used in the plant disease data set to group multiple pictures of
-      # the same leaf.
-      hash_name = re.sub(r'_nohash_.*$', '', file_name)
-      # This looks a bit magical, but we need to decide whether this file should
-      # go into the training, testing, or validation sets, and we want to keep
-      # existing files in the same set even if more files are subsequently
-      # added.
-      # To do that, we need a stable way of deciding based on just the file name
-      # itself, so we do a hash of that and then use that to generate a
-      # probability value that we use to assign it.
-      hash_name_hashed = hashlib.sha1(compat.as_bytes(hash_name)).hexdigest()
-      percentage_hash = ((int(hash_name_hashed, 16) %
-                          (MAX_NUM_IMAGES_PER_CLASS + 1)) *
-                         (100.0 / MAX_NUM_IMAGES_PER_CLASS))
-      if percentage_hash < validation_percentage:
-        validation_images.append(base_name)
-      elif percentage_hash < (testing_percentage + validation_percentage):
-        testing_images.append(base_name)
+
+  result = collections.OrderedDict()
+
+  for category in ["training", "testing", "validation"]:
+    image_dir = category_dir[category]
+    sub_dirs = [x[0] for x in gfile.Walk(image_dir)]
+    # The root directory comes first, so skip it.
+    is_root_dir = True
+    for sub_dir in sub_dirs:
+      if is_root_dir:
+        is_root_dir = False
+        continue
+      extensions = ['jpg', 'jpeg', 'JPG', 'JPEG']
+      file_list = []
+      dir_name = os.path.basename(sub_dir)
+      if dir_name == image_dir:
+        continue
+      print("Looking for images in '" + dir_name + "'")
+      for extension in extensions:
+        file_glob = os.path.join(image_dir, dir_name, '*.' + extension)
+        file_list.extend(gfile.Glob(file_glob))
+      if not file_list:
+        print('No files found')
+        continue
+      if len(file_list) < 20:
+        print('WARNING: Folder has less than 20 images, which may cause issues.')
+      elif len(file_list) > MAX_NUM_IMAGES_PER_CLASS:
+        print('WARNING: Folder {} has more than {} images. Some images will '
+              'never be selected.'.format(dir_name, MAX_NUM_IMAGES_PER_CLASS))
+      label_name = re.sub(r'[^a-z0-9]+', ' ', dir_name.lower())
+
+      if label_name in result:
+        label_results = result[label_name]
+        training_images = label_results["training"]
+        testing_images = label_results["testing"]
+        validation_images = label_results["validation"]
       else:
-        training_images.append(base_name)
-    result[label_name] = {
-        'dir': dir_name,
-        'training': training_images,
-        'testing': testing_images,
-        'validation': validation_images,
-    }
+        training_images = []
+        testing_images = []
+        validation_images = []
+
+      for file_name in file_list:
+        base_name = os.path.basename(file_name)
+        # We want to ignore anything after '_nohash_' in the file name when
+        # deciding which set to put an image in, the data set creator has a way of
+        # grouping photos that are close variations of each other. For example
+        # this is used in the plant disease data set to group multiple pictures of
+        # the same leaf.
+        hash_name = re.sub(r'_nohash_.*$', '', file_name)
+        # This looks a bit magical, but we need to decide whether this file should
+        # go into the training, testing, or validation sets, and we want to keep
+        # existing files in the same set even if more files are subsequently
+        # added.
+        # To do that, we need a stable way of deciding based on just the file name
+        # itself, so we do a hash of that and then use that to generate a
+        # probability value that we use to assign it.
+        hash_name_hashed = hashlib.sha1(compat.as_bytes(hash_name)).hexdigest()
+        percentage_hash = ((int(hash_name_hashed, 16) %
+                            (MAX_NUM_IMAGES_PER_CLASS + 1)) *
+                           (100.0 / MAX_NUM_IMAGES_PER_CLASS))
+
+        if percentage_hash < validation_percentage or category == "validation":
+          validation_images.append(base_name)
+        elif (percentage_hash < (testing_percentage + validation_percentage) 
+        or category == "testing"):
+          testing_images.append(base_name)
+        else:
+          training_images.append(base_name)
+
+      result[label_name] = {
+          'dir': dir_name,
+          'training': training_images,
+          'testing': testing_images,
+          'validation': validation_images,
+      }
+            
   return result
 
 
@@ -347,8 +409,8 @@ def read_list_of_floats_from_file(file_path):
 bottleneck_path_2_bottleneck_values = {}
 
 
-def get_or_create_bottleneck(sess, image_lists, label_name, index, image_dir,
-                             category, bottleneck_dir, jpeg_data_tensor,
+def get_or_create_bottleneck(sess, image_lists, label_name, index, category,
+                             category_dir, bottleneck_dir, jpeg_data_tensor,
                              bottleneck_tensor):
   """Retrieves or calculates bottleneck values for an image.
 
@@ -380,8 +442,8 @@ def get_or_create_bottleneck(sess, image_lists, label_name, index, image_dir,
                                         bottleneck_dir, category)
   if not os.path.exists(bottleneck_path):
     print('Creating bottleneck at ' + bottleneck_path)
-    image_path = get_image_path(image_lists, label_name, index, image_dir,
-                                category)
+    image_path = get_image_path(image_lists, label_name, index, 
+      category_dir[category], category)
     if not gfile.Exists(image_path):
       tf.logging.fatal('File does not exist %s', image_path)
     image_data = gfile.FastGFile(image_path, 'rb').read()
@@ -398,8 +460,8 @@ def get_or_create_bottleneck(sess, image_lists, label_name, index, image_dir,
   return bottleneck_values
 
 
-def cache_bottlenecks(sess, image_lists, image_dir, bottleneck_dir,
-                      jpeg_data_tensor, bottleneck_tensor):
+def cache_bottlenecks(sess, image_lists, bottleneck_dir,
+                      jpeg_data_tensor, bottleneck_tensor, category_dir):
   """Ensures all the training, testing, and validation bottlenecks are cached.
 
   Because we're likely to read the same image multiple times (if there are no
@@ -428,16 +490,15 @@ def cache_bottlenecks(sess, image_lists, image_dir, bottleneck_dir,
       category_list = label_lists[category]
       for index, unused_base_name in enumerate(category_list):
         get_or_create_bottleneck(sess, image_lists, label_name, index,
-                                 image_dir, category, bottleneck_dir,
+                                 category, category_dir, bottleneck_dir,
                                  jpeg_data_tensor, bottleneck_tensor)
         how_many_bottlenecks += 1
         if how_many_bottlenecks % 100 == 0:
           print(str(how_many_bottlenecks) + ' bottleneck files created.')
 
 
-def get_random_cached_bottlenecks(sess, image_lists, how_many, category,
-                                  bottleneck_dir, image_dir, jpeg_data_tensor,
-                                  bottleneck_tensor):
+def get_random_cached_bottlenecks(sess, image_lists, how_many, category, category_dir,
+                                  bottleneck_dir, jpeg_data_tensor, bottleneck_tensor):
   """Retrieves bottleneck values for cached images.
 
   If no distortions are being applied, this function can retrieve the cached
@@ -472,9 +533,9 @@ def get_random_cached_bottlenecks(sess, image_lists, how_many, category,
       label_name = list(image_lists.keys())[label_index]
       image_index = random.randrange(MAX_NUM_IMAGES_PER_CLASS + 1)
       image_name = get_image_path(image_lists, label_name, image_index,
-                                  image_dir, category)
+                                  category_dir[category], category)
       bottleneck = get_or_create_bottleneck(sess, image_lists, label_name,
-                                            image_index, image_dir, category,
+                                            image_index, category, category_dir,
                                             bottleneck_dir, jpeg_data_tensor,
                                             bottleneck_tensor)
       ground_truth = np.zeros(class_count, dtype=np.float32)
@@ -488,9 +549,9 @@ def get_random_cached_bottlenecks(sess, image_lists, how_many, category,
       for image_index, image_name in enumerate(
           image_lists[label_name][category]):
         image_name = get_image_path(image_lists, label_name, image_index,
-                                    image_dir, category)
+                                    category_dir[category], category)
         bottleneck = get_or_create_bottleneck(sess, image_lists, label_name,
-                                              image_index, image_dir, category,
+                                              image_index, category, category_dir,
                                               bottleneck_dir, jpeg_data_tensor,
                                               bottleneck_tensor)
         ground_truth = np.zeros(class_count, dtype=np.float32)
@@ -502,7 +563,7 @@ def get_random_cached_bottlenecks(sess, image_lists, how_many, category,
 
 
 def get_random_distorted_bottlenecks(
-    sess, image_lists, how_many, category, image_dir, input_jpeg_tensor,
+    sess, image_lists, how_many, category, category_dir, input_jpeg_tensor,
     distorted_image, resized_input_tensor, bottleneck_tensor):
   """Retrieves bottleneck values for training images, after distortions.
 
@@ -535,8 +596,8 @@ def get_random_distorted_bottlenecks(
     label_index = random.randrange(class_count)
     label_name = list(image_lists.keys())[label_index]
     image_index = random.randrange(MAX_NUM_IMAGES_PER_CLASS + 1)
-    image_path = get_image_path(image_lists, label_name, image_index, image_dir,
-                                category)
+    image_path = get_image_path(image_lists, label_name, image_index,
+      category_dir[category], category)
     if not gfile.Exists(image_path):
       tf.logging.fatal('File does not exist %s', image_path)
     jpeg_data = gfile.FastGFile(image_path, 'rb').read()
@@ -675,7 +736,8 @@ def variable_summaries(var):
     tf.summary.histogram('histogram', var)
 
 
-def add_final_training_ops(class_count, final_tensor_name, bottleneck_tensor):
+def add_final_training_ops(class_count, final_tensor_name, bottleneck_tensor,
+    layer_sizes):
   """Adds a new softmax and fully-connected layer for training.
 
   We need to retrain the top layer to identify our new classes, so this function
@@ -703,19 +765,33 @@ def add_final_training_ops(class_count, final_tensor_name, bottleneck_tensor):
     ground_truth_input = tf.placeholder(tf.float32,
                                         [None, class_count],
                                         name='GroundTruthInput')
+  
+  keep_prob = tf.placeholder(tf.float32)
+  fclayer = []
+  last_layer_size = BOTTLENECK_TENSOR_SIZE
+  last_layer = bottleneck_input
+
+  for i in range(len(layer_sizes)):
+    layer_name = 'fclayer_' + i
+    fclayer_weights = tf.Variable(tf.truncated_normal([last_layer_size, layer_sizes[i]], stddev=0.001))
+    fclayer_biases = tf.Variable(tf.zeros([layer_sizes[i]]))
+    fclayer.append(tf.nn.relu(tf.matmul(last_layer, fclayer_weights) + fclayer_biases))
+    dropout = tf.nn.dropout(fclayer[-1], keep_prob)
+    last_layer_size = layer_sizes[i]
+    last_layer = fclayer[-1]
 
   # Organizing the following ops as `final_training_ops` so they're easier
   # to see in TensorBoard
   layer_name = 'final_training_ops'
   with tf.name_scope(layer_name):
     with tf.name_scope('weights'):
-      layer_weights = tf.Variable(tf.truncated_normal([BOTTLENECK_TENSOR_SIZE, class_count], stddev=0.001), name='final_weights')
+      layer_weights = tf.Variable(tf.truncated_normal([last_layer_size, class_count], stddev=0.001), name='final_weights')
       variable_summaries(layer_weights)
     with tf.name_scope('biases'):
       layer_biases = tf.Variable(tf.zeros([class_count]), name='final_biases')
       variable_summaries(layer_biases)
     with tf.name_scope('Wx_plus_b'):
-      logits = tf.matmul(bottleneck_input, layer_weights) + layer_biases
+      logits = tf.matmul(last_layer, layer_weights) + layer_biases
       tf.summary.histogram('pre_activations', logits)
 
   final_tensor = tf.nn.softmax(logits, name=final_tensor_name)
@@ -769,9 +845,18 @@ def main(_):
   graph, bottleneck_tensor, jpeg_data_tensor, resized_image_tensor = (
       create_inception_graph())
 
+  # Directories for training, testing and validation data, if different
+  category_dir = create_category_dir(FLAGS.image_dir, FLAGS.test_dir,
+                                     FLAGS.validation_dir)
+
+  FLAGS.testing_percentage, FLAGS.validation_percentage = (
+    adjust_category_percentages(category_dir, FLAGS.testing_percentage,
+    FLAGS.validation_percentage))
+
   # Look at the folder structure, and create lists of all the images.
-  image_lists = create_image_lists(FLAGS.image_dir, FLAGS.testing_percentage,
+  image_lists = create_image_lists(category_dir, FLAGS.testing_percentage,
                                    FLAGS.validation_percentage)
+                                   
   class_count = len(image_lists.keys())
   if class_count == 0:
     print('No valid folders of images found at ' + FLAGS.image_dir)
@@ -795,14 +880,15 @@ def main(_):
   else:
     # We'll make sure we've calculated the 'bottleneck' image summaries and
     # cached them on disk.
-    cache_bottlenecks(sess, image_lists, FLAGS.image_dir, FLAGS.bottleneck_dir,
-                      jpeg_data_tensor, bottleneck_tensor)
+    cache_bottlenecks(sess, image_lists, FLAGS.bottleneck_dir,
+                      jpeg_data_tensor, bottleneck_tensor, category_dir)
 
   # Add the new layer that we'll be training.
   (train_step, cross_entropy, bottleneck_input, ground_truth_input,
    final_tensor) = add_final_training_ops(len(image_lists.keys()),
                                           FLAGS.final_tensor_name,
-                                          bottleneck_tensor)
+                                          bottleneck_tensor,
+                                          FLAGS.add_layers)
 
   # Create the operations we need to evaluate the accuracy of our new layer.
   evaluation_step, prediction = add_evaluation_step(
@@ -824,19 +910,19 @@ def main(_):
     # with distortions applied, or from the cache stored on disk.
     if do_distort_images:
       train_bottlenecks, train_ground_truth = get_random_distorted_bottlenecks(
-          sess, image_lists, FLAGS.train_batch_size, 'training',
-          FLAGS.image_dir, distorted_jpeg_data_tensor,
+          sess, image_lists, FLAGS.train_batch_size, 'training', category_dir,
+          distorted_jpeg_data_tensor,
           distorted_image_tensor, resized_image_tensor, bottleneck_tensor)
     else:
       train_bottlenecks, train_ground_truth, _ = get_random_cached_bottlenecks(
-          sess, image_lists, FLAGS.train_batch_size, 'training',
-          FLAGS.bottleneck_dir, FLAGS.image_dir, jpeg_data_tensor,
-          bottleneck_tensor)
+          sess, image_lists, FLAGS.train_batch_size, 'training', category_dir,
+          FLAGS.bottleneck_dir, jpeg_data_tensor, bottleneck_tensor)
     # Feed the bottlenecks and ground truth into the graph, and run a training
     # step. Capture training summaries for TensorBoard with the `merged` op.
     train_summary, _ = sess.run([merged, train_step],
              feed_dict={bottleneck_input: train_bottlenecks,
-                        ground_truth_input: train_ground_truth})
+                        ground_truth_input: train_ground_truth,
+                        keep_prob: 1-FLAGS.dropout-prob})
     train_writer.add_summary(train_summary, i)
 
     # Every so often, print out how well the graph is training.
@@ -845,7 +931,8 @@ def main(_):
       train_accuracy, cross_entropy_value = sess.run(
           [evaluation_step, cross_entropy],
           feed_dict={bottleneck_input: train_bottlenecks,
-                     ground_truth_input: train_ground_truth})
+                     ground_truth_input: train_ground_truth,
+                     keep_prob: 1-FLAGS.dropout-prob})
       print('%s: Step %d: Train accuracy = %.1f%%' % (datetime.now(), i,
                                                       train_accuracy * 100))
       print('%s: Step %d: Cross entropy = %f' % (datetime.now(), i,
@@ -853,14 +940,15 @@ def main(_):
       validation_bottlenecks, validation_ground_truth, _ = (
           get_random_cached_bottlenecks(
               sess, image_lists, FLAGS.validation_batch_size, 'validation',
-              FLAGS.bottleneck_dir, FLAGS.image_dir, jpeg_data_tensor,
+              category_dir, FLAGS.bottleneck_dir, jpeg_data_tensor,
               bottleneck_tensor))
       # Run a validation step and capture training summaries for TensorBoard
       # with the `merged` op.
       validation_summary, validation_accuracy = sess.run(
           [merged, evaluation_step],
           feed_dict={bottleneck_input: validation_bottlenecks,
-                     ground_truth_input: validation_ground_truth})
+                     ground_truth_input: validation_ground_truth,
+                     keep_prob: 1-FLAGS.dropout-prob})
       validation_writer.add_summary(validation_summary, i)
       print('%s: Step %d: Validation accuracy = %.1f%% (N=%d)' %
             (datetime.now(), i, validation_accuracy * 100,
@@ -870,13 +958,13 @@ def main(_):
   # some new images we haven't used before.
   test_bottlenecks, test_ground_truth, test_filenames = (
       get_random_cached_bottlenecks(sess, image_lists, FLAGS.test_batch_size,
-                                    'testing', FLAGS.bottleneck_dir,
-                                    FLAGS.image_dir, jpeg_data_tensor,
-                                    bottleneck_tensor))
+                                    'testing', category_dir, FLAGS.bottleneck_dir,
+                                    jpeg_data_tensor, bottleneck_tensor))
   test_accuracy, predictions = sess.run(
       [evaluation_step, prediction],
       feed_dict={bottleneck_input: test_bottlenecks,
-                 ground_truth_input: test_ground_truth})
+                 ground_truth_input: test_ground_truth,
+                 keep_prob: 1-FLAGS.dropout-prob})
   print('Final test accuracy = %.1f%% (N=%d)' % (
       test_accuracy * 100, len(test_bottlenecks)))
 
@@ -884,7 +972,28 @@ def main(_):
     print('=== MISCLASSIFIED TEST IMAGES ===')
     for i, test_filename in enumerate(test_filenames):
       if predictions[i] != test_ground_truth[i].argmax():
-        print('%70s  %s' % (test_filename, image_lists.keys()[predictions[i]]))
+        print('%70s  %s' % (test_filename, list(image_lists.keys())[predictions[i]]))
+
+  # If valid labels have been supplied with --write_binary_classifications,
+  # write a CSV file containing binary classifications with respect to these
+  # labels.
+  if len(FLAGS.write_binary_classifications) > 0:
+    ordered_labels = list(image_lists.keys())
+    for label_to_check in FLAGS.write_binary_classifications:
+      if not label_to_check in ordered_labels:
+        print("Error: Label '" + label_to_check + "' not in training set") 
+
+    with open('predictions.csv', mode='w') as csvfile:
+      predict_writer = csv.writer(csvfile, delimiter=',', lineterminator='\n')
+      predict_writer.writerow(['Id','task_1','task_2'])
+      for i, test_filename in enumerate(test_filenames):
+        label_probability = [test_filename]
+        for class_label in FLAGS.write_binary_classifications:
+          if class_label == ordered_labels[predictions[i]]:
+            label_probability.append(1.0)
+          else:
+            label_probability.append(0.0)
+        predict_writer.writerow(label_probability)
 
   # Write out the trained graph and labels with the weights stored as constants.
   output_graph_def = graph_util.convert_variables_to_constants(
@@ -944,6 +1053,18 @@ if __name__ == '__main__':
       type=int,
       default=10,
       help='What percentage of images to use as a validation set.'
+  )
+  parser.add_argument(
+      '--test_dir',
+      type=str,
+      default='',
+      help='Directory containing images to use for testing.'
+  )
+  parser.add_argument(
+      '--validation_dir',
+      type=str,
+      default='',
+      help='Directory containing images to use for validation.'
   )
   parser.add_argument(
       '--eval_step_interval',
@@ -1046,6 +1167,34 @@ if __name__ == '__main__':
       help="""\
       A percentage determining how much to randomly multiply the training image
       input pixels up or down by.\
+      """
+  )
+  parser.add_argument(
+      '--add_layers',
+      type=str,
+      default='',
+      nargs='+',
+      help="""\
+      To add fully connected layers between the bottleneck and output layers,
+      follow this argument by the sizes of the additional layers, space
+      separated.\
+      """
+  )
+  parser.add_argument(
+      '--dropout-prob',
+      type=float,
+      default=0.5,
+      help='Dropout probability to use for fully connected layers.'
+  )
+  parser.add_argument(
+      '--write_binary_classifications',
+      type=str,
+      default='',
+      nargs='+',
+      help="""\
+      If at least one label is given, writes a csv file containing, for each
+      image, the probability that the image is associated with the label. For
+      multiple space separated labels, adds one column for each label.\
       """
   )
   FLAGS, unparsed = parser.parse_known_args()
