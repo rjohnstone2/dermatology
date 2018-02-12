@@ -772,7 +772,7 @@ def add_final_training_ops(class_count, final_tensor_name, bottleneck_tensor,
   last_layer = bottleneck_input
 
   for i in range(len(layer_sizes)):
-    layer_name = 'fclayer_' + i
+    layer_name = 'fclayer_' + str(i)
     fclayer_weights = tf.Variable(tf.truncated_normal([last_layer_size, layer_sizes[i]], stddev=0.001))
     fclayer_biases = tf.Variable(tf.zeros([layer_sizes[i]]))
     fclayer.append(tf.nn.relu(tf.matmul(last_layer, fclayer_weights) + fclayer_biases))
@@ -809,7 +809,7 @@ def add_final_training_ops(class_count, final_tensor_name, bottleneck_tensor,
         cross_entropy_mean)
 
   return (train_step, cross_entropy_mean, bottleneck_input, ground_truth_input,
-          final_tensor)
+          final_tensor, keep_prob)
 
 
 def add_evaluation_step(result_tensor, ground_truth_tensor):
@@ -884,8 +884,8 @@ def main(_):
                       jpeg_data_tensor, bottleneck_tensor, category_dir)
 
   # Add the new layer that we'll be training.
-  (train_step, cross_entropy, bottleneck_input, ground_truth_input,
-   final_tensor) = add_final_training_ops(len(image_lists.keys()),
+  (train_step, cross_entropy, bottleneck_input, ground_truth_input, final_tensor,
+  keep_prob) = add_final_training_ops(len(image_lists.keys()),
                                           FLAGS.final_tensor_name,
                                           bottleneck_tensor,
                                           FLAGS.add_layers)
@@ -922,7 +922,7 @@ def main(_):
     train_summary, _ = sess.run([merged, train_step],
              feed_dict={bottleneck_input: train_bottlenecks,
                         ground_truth_input: train_ground_truth,
-                        keep_prob: 1-FLAGS.dropout-prob})
+                        keep_prob: (1-FLAGS.dropout_prob)})
     train_writer.add_summary(train_summary, i)
 
     # Every so often, print out how well the graph is training.
@@ -932,7 +932,7 @@ def main(_):
           [evaluation_step, cross_entropy],
           feed_dict={bottleneck_input: train_bottlenecks,
                      ground_truth_input: train_ground_truth,
-                     keep_prob: 1-FLAGS.dropout-prob})
+                     keep_prob: (1-FLAGS.dropout_prob)})
       print('%s: Step %d: Train accuracy = %.1f%%' % (datetime.now(), i,
                                                       train_accuracy * 100))
       print('%s: Step %d: Cross entropy = %f' % (datetime.now(), i,
@@ -948,7 +948,7 @@ def main(_):
           [merged, evaluation_step],
           feed_dict={bottleneck_input: validation_bottlenecks,
                      ground_truth_input: validation_ground_truth,
-                     keep_prob: 1-FLAGS.dropout-prob})
+                     keep_prob: (1-FLAGS.dropout_prob)})
       validation_writer.add_summary(validation_summary, i)
       print('%s: Step %d: Validation accuracy = %.1f%% (N=%d)' %
             (datetime.now(), i, validation_accuracy * 100,
@@ -964,7 +964,7 @@ def main(_):
       [evaluation_step, prediction],
       feed_dict={bottleneck_input: test_bottlenecks,
                  ground_truth_input: test_ground_truth,
-                 keep_prob: 1-FLAGS.dropout-prob})
+                 keep_prob: (1-FLAGS.dropout_prob)})
   print('Final test accuracy = %.1f%% (N=%d)' % (
       test_accuracy * 100, len(test_bottlenecks)))
 
@@ -1171,7 +1171,7 @@ if __name__ == '__main__':
   )
   parser.add_argument(
       '--add_layers',
-      type=str,
+      type=int,
       default='',
       nargs='+',
       help="""\
@@ -1181,7 +1181,7 @@ if __name__ == '__main__':
       """
   )
   parser.add_argument(
-      '--dropout-prob',
+      '--dropout_prob',
       type=float,
       default=0.5,
       help='Dropout probability to use for fully connected layers.'
