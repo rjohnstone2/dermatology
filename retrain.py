@@ -1172,7 +1172,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--add_layers',
       type=int,
-      default='',
+      default=[],
       nargs='+',
       help="""\
       To add fully connected layers between the bottleneck and output layers,
