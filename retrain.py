@@ -94,6 +94,7 @@ FLAGS = None
 # need to update these to reflect the values in the network you're using.
 # pylint: disable=line-too-long
 DATA_URL = 'http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz'
+# DATA_URL = 'http://download.tensorflow.org/models/official/resnet50_2017_11_30.tar.gz'
 # pylint: enable=line-too-long
 BOTTLENECK_TENSOR_NAME = 'pool_3/_reshape:0'
 BOTTLENECK_TENSOR_SIZE = 2048
@@ -773,19 +774,27 @@ def add_final_training_ops(class_count, final_tensor_name, bottleneck_tensor,
 
   for i in range(len(layer_sizes)):
     layer_name = 'fclayer_' + str(i)
-    fclayer_weights = tf.Variable(tf.truncated_normal([last_layer_size, layer_sizes[i]], stddev=0.001))
-    fclayer_biases = tf.Variable(tf.zeros([layer_sizes[i]]))
-    fclayer.append(tf.nn.relu(tf.matmul(last_layer, fclayer_weights) + fclayer_biases))
-    dropout = tf.nn.dropout(fclayer[-1], keep_prob)
+    with tf.variable_scope(layer_name):
+      with tf.variable_scope('weights'):
+        fclayer_weights = tf.Variable(tf.truncated_normal([last_layer_size, layer_sizes[i]], stddev=0.1))
+        variable_summaries(fclayer_weights)
+      with tf.variable_scope('biases'):
+        fclayer_biases = tf.Variable(tf.zeros([layer_sizes[i]]))
+        variable_summaries(fclayer_biases)
+      with tf.variable_scope('Wx_plus_b'):
+        last_layer = tf.matmul(last_layer, fclayer_weights) + fclayer_biases
+        tf.summary.histogram('pre_activations', last_layer)
+    last_layer = tf.nn.relu(last_layer)
+    last_layer = tf.nn.dropout(last_layer, keep_prob)
+    fclayer.append(last_layer)
     last_layer_size = layer_sizes[i]
-    last_layer = fclayer[-1]
 
   # Organizing the following ops as `final_training_ops` so they're easier
   # to see in TensorBoard
   layer_name = 'final_training_ops'
   with tf.name_scope(layer_name):
     with tf.name_scope('weights'):
-      layer_weights = tf.Variable(tf.truncated_normal([last_layer_size, class_count], stddev=0.001), name='final_weights')
+      layer_weights = tf.Variable(tf.truncated_normal([last_layer_size, class_count], stddev=0.01), name='final_weights')
       variable_summaries(layer_weights)
     with tf.name_scope('biases'):
       layer_biases = tf.Variable(tf.zeros([class_count]), name='final_biases')
