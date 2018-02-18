@@ -94,6 +94,7 @@ FLAGS = None
 # need to update these to reflect the values in the network you're using.
 # pylint: disable=line-too-long
 DATA_URL = 'http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz'
+#DATA_URL = 'http://download.tensorflow.org/models/inception_v3_2016_08_28.tar.gz'
 # DATA_URL = 'http://download.tensorflow.org/models/official/resnet50_2017_11_30.tar.gz'
 # pylint: enable=line-too-long
 BOTTLENECK_TENSOR_NAME = 'pool_3/_reshape:0'
@@ -784,7 +785,7 @@ def add_final_training_ops(class_count, final_tensor_name, bottleneck_tensor,
       with tf.variable_scope('Wx_plus_b'):
         last_layer = tf.matmul(last_layer, fclayer_weights) + fclayer_biases
         tf.summary.histogram('pre_activations', last_layer)
-    last_layer = tf.nn.relu(last_layer)
+    last_layer = tf.nn.elu(last_layer)
     last_layer = tf.nn.dropout(last_layer, keep_prob)
     fclayer.append(last_layer)
     last_layer_size = layer_sizes[i]
@@ -909,9 +910,15 @@ def main(_):
                                        sess.graph)
   validation_writer = tf.summary.FileWriter(FLAGS.summaries_dir + '/validation')
 
+  max_validation_accuracy = 0.0
+  saver = tf.train.Saver()
+
   # Set up all our weights to their initial default values.
   init = tf.global_variables_initializer()
   sess.run(init)
+
+  if os.path.exists("/tmp/retrain.ckpt.index"):
+    saver.restore(sess, "/tmp/retrain.ckpt")
 
   # Run the training for as many cycles as requested on the command line.
   for i in range(FLAGS.how_many_training_steps):
@@ -963,8 +970,18 @@ def main(_):
             (datetime.now(), i, validation_accuracy * 100,
              len(validation_bottlenecks)))
 
+      # save a checkpoint
+      if validation_accuracy > max_validation_accuracy:
+      	saver.save(sess, "/tmp/retrain.ckpt")
+        max_validation_accuracy = validation_accuracy
+
   # We've completed all our training, so run a final test evaluation on
   # some new images we haven't used before.
+
+  # Restore the best network we were able to train first
+  if os.path.exists("/tmp/retrain.ckpt.index"):
+    saver.restore(sess, "/tmp/retrain.ckpt")
+
   test_bottlenecks, test_ground_truth, test_filenames = (
       get_random_cached_bottlenecks(sess, image_lists, FLAGS.test_batch_size,
                                     'testing', category_dir, FLAGS.bottleneck_dir,
